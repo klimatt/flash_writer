@@ -1,0 +1,14 @@
+[default.general]
+#chip = "STM32F042"
+chip = "STM32G474"
+
+[default.rtt]
+enabled = true
+show_timestamps = true
+
+[default.probe]
+protocol = "Swd"
+#USB vendor ID
+#usb_vid = "0483"
+# USB product ID
+#usb_pid = "374e"
