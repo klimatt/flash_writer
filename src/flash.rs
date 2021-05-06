@@ -18,7 +18,8 @@ pub enum FlashWriterError{
     BsyTimeout,
     EraseFailed,
     FlashLocked,
-    WriteFailed
+    WriteFailed,
+    WrongBankId,
 }
 
 struct WriteBuff {
@@ -26,9 +27,13 @@ struct WriteBuff {
     len: usize
 }
 
-struct FlashConfig {
+struct FlashBanks {
     addresses: RangeInclusive<u32>,
-    banks_amount: u8,
+    start_page_num: u32
+}
+
+struct FlashConfig {
+    flash_banks: Banks,
     page_size: usize, // in bytes
     program_size: usize // in bytes
 }
@@ -42,7 +47,8 @@ pub struct FlashWriter{
 }
 
 fn check_addresses_range(range: &mut RangeInclusive<u32>) -> bool {
-    *FLASH_CFG.addresses.start() <= *range.start() && *FLASH_CFG.addresses.end() >= *range.end()
+    let flash_range = *FLASH_CFG.flash_banks[0].addresses.start()..=*FLASH_CFG.flash_banks[FLASH_CFG.flash_banks.len()-1].addresses.end();
+    *flash_range.start() <= *range.start() && *flash_range.end() >= *range.end()
 }
 
 
@@ -50,8 +56,8 @@ fn check_addresses_range(range: &mut RangeInclusive<u32>) -> bool {
 #[inline(never)]
 fn check_bsy_sram(regs: &mut flash::Instance) -> Result<(), FlashWriterError> {
     let mut cnt: u8 = 0;
-    while read_reg!(flash, regs, SR, BSY) == flash::SR::BSY::R::Active  || cnt < 100 { cnt += 1; }
-    match read_reg!(flash, regs, SR, BSY) == flash::SR::BSY::R::Active {
+    while read_reg!(flash, regs, SR, BSY) == 1  || cnt < 100 { cnt += 1; }
+    match read_reg!(flash, regs, SR, BSY) == 1 {
         true => { Err(FlashWriterError::BsyTimeout) }
         false => { Ok(()) }
     }
@@ -61,15 +67,33 @@ fn check_bsy_sram(regs: &mut flash::Instance) -> Result<(), FlashWriterError> {
 #[inline(never)]
 fn erase_sram(flash_writer: &mut FlashWriter) -> Result<(), FlashWriterError> {
     for offset in (flash_writer.start_address..flash_writer.end_address).step_by(FLASH_CFG.page_size) {
-        modify_reg!(flash, flash_writer.regs, CR, PER: PageErase);
-        #[cfg(feature = "stm32f0x1")]
+        if FLASH_CFG.flash_banks.len() >= 1 {
+            let mut bank_id = -1i8;
+            for i in 0..FLASH_CFG.flash_banks.len() {
+                let a = FLASH_CFG.flash_banks[i].addresses.contains(&offset);
+                if FLASH_CFG.flash_banks[i].addresses.contains(&offset) {
+                    bank_id = i as i8;
+                    break;
+                }
+            }
+            if bank_id == -1 { return Err(FlashWriterError::WrongBankId); }
+
+            modify_reg!(flash, flash_writer.regs, CR, PER: 1u32);
+            modify_reg!(flash, flash_writer.regs, CR, BKER: bank_id as u32);
+            #[cfg(feature = "stm32l4x6")]
+            modify_reg!(flash, flash_writer.regs, CR, PNB: (offset - *FLASH_CFG.flash_banks[bank_id as usize].addresses.start() / FLASH_CFG.page_size as u32));
+            #[cfg(feature = "stm32l4x6")]
+            modify_reg!(flash, flash_writer.regs, CR, START: 1u32);
+            #[cfg(feature = "stm32f0x1")]
             write_reg!(flash, flash_writer.regs, AR, offset);
-        modify_reg!(flash, flash_writer.regs, CR, STRT: Start);
+
+            //modify_reg!(flash, flash_writer.regs, CR, START: Start);
+        }
         match check_bsy_sram(&mut flash_writer.regs) {
             Err(e) => { return Err(e); }
             Ok(_) => {
-                match read_reg!(flash, flash_writer.regs, SR, EOP) == flash::SR::EOP::RW::Event {
-                    true => { modify_reg!(flash, flash_writer.regs, SR, EOP: Event); }
+                match read_reg!(flash, flash_writer.regs, SR, EOP) == 1 {
+                    true => { modify_reg!(flash, flash_writer.regs, SR, EOP: 1); }
                     false => { return Err(FlashWriterError::EraseFailed); }
                 }
             }
@@ -81,16 +105,16 @@ fn erase_sram(flash_writer: &mut FlashWriter) -> Result<(), FlashWriterError> {
 #[link_section = ".data"]
 #[inline(never)]
 fn write_sram(regs: &mut flash::Instance, address: u32, data: ProgramChunk) -> Result<(), FlashWriterError> {
-    modify_reg!(flash, regs, CR, PG: Program);
+    modify_reg!(flash, regs, CR, PG: 1u32);
     let w_a = address as *mut ProgramChunk;
     unsafe { core::ptr::write_volatile(w_a, data) };
     match check_bsy_sram(regs) {
         Err(e) => { return Err(e); }
         Ok(_) => {
             modify_reg!(flash, regs, CR, PG: 0b0);
-            match read_reg!(flash, regs, SR, EOP) == flash::SR::EOP::RW::Event {
+            match read_reg!(flash, regs, SR, EOP) == 1 {
                 true => {
-                    modify_reg!(flash, regs, SR, EOP: Event);
+                    modify_reg!(flash, regs, SR, EOP: 1);
                     Ok(())
                 }
                 false => { return Err(FlashWriterError::WriteFailed); }
@@ -146,7 +170,7 @@ impl FlashWriter{
     pub fn new(mut range: RangeInclusive<u32>) -> Result<self::FlashWriter, FlashWriterError> {
         match check_addresses_range(range.borrow_mut()){
             true => {
-                let regs = flash::Flash::take().unwrap(); //TODO remove unwrap
+                let regs = flash::FLASH::take().unwrap(); //TODO remove unwrap
                 Ok(
                 FlashWriter{
                     start_address: *range.start(),
@@ -179,18 +203,18 @@ impl FlashWriter{
     }
 
     fn lock(&mut self){
-        modify_reg!(flash, self.regs, CR, LOCK: Locked);
+        modify_reg!(flash, self.regs, CR, LOCK: 1u32);
     }
 
     fn unlock(&mut self) -> Result<(), FlashWriterError>{
         match check_bsy_sram(&mut self.regs){
             Err(e) => { return Err(e); }
             Ok(_) => {
-                if read_reg!(flash, self.regs, CR, LOCK) == flash::CR::LOCK::RW::Locked {
+                if read_reg!(flash, self.regs, CR, LOCK) == 1 {
                     write_reg!(flash, self.regs, KEYR, KEY_1);
                     write_reg!(flash, self.regs, KEYR, KEY_2);
                 }
-                match read_reg!(flash, self.regs, CR, LOCK) == flash::CR::LOCK::RW::Unlocked {
+                match read_reg!(flash, self.regs, CR, LOCK) == 0 {
                     true => Ok(()),
                     false => Err( FlashWriterError::FlashLocked ),
                 }
@@ -212,7 +236,7 @@ impl FlashWriter{
         }
     }
 
-    pub fn flush(&mut self) -> Result<(),FlashWriterError> {
+    pub fn flush(&mut self) -> Result<(), FlashWriterError> {
         if self.buffer.len != 0 {
             let mut dat = ProgramChunk::max_value();
             for i in 0..self.buffer.len{
@@ -223,7 +247,7 @@ impl FlashWriter{
                     self.buffer.len = 0;
                     Ok(())
                 }
-                Err(e) => { return Err(e);}
+                Err(e) => { return Err(e); }
             }
         }
         else {
@@ -239,5 +263,25 @@ const FLASH_CFG: FlashConfig = FlashConfig{
     page_size: 1024,
     banks_amount: 1,
     addresses: 0x0800_0000..=0x0800_0000 + 512 * 1024,
+    program_size: 2
+};
+
+#[cfg(feature = "stm32l4x6")]
+pub type ProgramChunk = u64;
+#[cfg(feature = "stm32l4x6")]
+pub type Banks = [FlashBanks; 2];
+#[cfg(feature = "stm32l4x6")]
+const FLASH_CFG: FlashConfig = FlashConfig{
+    page_size: 2048,
+    flash_banks: [
+        FlashBanks {
+            addresses: 0x0800_0000..=0x0801_FFFF,
+            start_page_num: 0
+        },
+        FlashBanks {
+            addresses: 0x0802_0000..=0x0803_FFFF,
+            start_page_num: 256
+        }
+    ],
     program_size: 2
 };

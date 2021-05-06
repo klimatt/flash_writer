@@ -1,6 +1,8 @@
 [target.thumbv6m-none-eabi]
 runner = "jlink-flasher"
 
+[target.thumbv7em-none-eabi]
+runner = "jlink-flasher"
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 # uncomment ONE of these three option to make `cargo run` start a GDB session

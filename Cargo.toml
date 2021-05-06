@@ -8,6 +8,9 @@ edition = "2018"
 
 [dependencies]
 cfg-if = "0.1"
+rtt-target = { version = "0.2.2", features = ["cortex-m"] }
+cortex-m-rt = "0.6"
+cortex-m = "0.6"
 
 [dependencies.stm32ral]
 version = "0.4.0"
@@ -16,7 +19,7 @@ default-features = false
 [features]
 default = []
 stm32f0x1 = [ "stm32ral/stm32f0x1", "stm32ral/rt"]
-
+stm32l4x6 = [ "stm32ral/stm32l4x6", "stm32ral/rt"]
 
 
 [profile.release]
