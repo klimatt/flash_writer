@@ -138,7 +138,7 @@ fn write_sram(regs: &mut FLASH, address: u32, data: ProgramChunk) -> Result<(), 
         }
     }
 }
-
+///TODO move flash_regs to each function insted of owning it in struct
 impl FlashWriter{
     pub fn new(mut range: RangeInclusive<u32>, regs: FLASH) -> Result<self::FlashWriter, FlashWriterError> {
         let mut flash_range = START_ADDR..=START_ADDR + stm32_device_signature::flash_size_kb() as u32 * 1024u32;
@@ -191,6 +191,9 @@ impl FlashWriter{
     }
 
     fn unlock(&mut self) -> Result<(), FlashWriterError>{
+        if self.regs.cr.read().lock().bit_is_clear(){
+            return Ok(())
+        }
         match check_bsy_sram(&mut self.regs){
             Err(e) => { return Err(e); }
             Ok(_) => {
@@ -205,11 +208,11 @@ impl FlashWriter{
             }
         }
     }
-
-    pub fn write(&mut self, data: &[u8]) -> Result<(), FlashWriterError> {
+    pub fn write<T>(&mut self, data_input: &[T]) -> Result<(), FlashWriterError> {
         match self.unlock(){
             Err(e) => { return Err(e); }
             Ok(_) => {
+                let data = unsafe { core::slice::from_raw_parts(data_input.as_ptr() as *const u8, data_input.len() * core::mem::size_of::<T>()) };
                 self.image_len += data.len();
                 let mut len_to_take = 0usize;
                 if self.buffer.len != 0 {
@@ -231,7 +234,7 @@ impl FlashWriter{
                     };
                     match write_sram(self.regs.borrow_mut(), self.next_write_address, dat) {
                         Ok(_) => {
-                            if self.next_write_address < (self.end_address - PROGRAM_SIZE as u32) {
+                            if self.next_write_address <= (self.end_address - PROGRAM_SIZE as u32) {
                                 self.next_write_address += PROGRAM_SIZE as u32;
                             }
                             else{
@@ -256,7 +259,7 @@ impl FlashWriter{
                         };
                         match write_sram(self.regs.borrow_mut(), self.next_write_address, dat) {
                             Ok(_) => {
-                                if self.next_write_address < (self.end_address - PROGRAM_SIZE as u32) {
+                                if self.next_write_address <= (self.end_address - PROGRAM_SIZE as u32) {
                                     self.next_write_address += PROGRAM_SIZE as u32;
                                 }
                                 else{
@@ -274,8 +277,15 @@ impl FlashWriter{
         }
     }
 
-    pub fn read<T>(&mut self, addr: u32, len_to_read: usize) -> &[T] {
-        unsafe { core::slice::from_raw_parts(addr as *const T, len_to_read) }
+    pub fn read<T>(&mut self, addr: u32, len_to_read: usize) -> Result<&[T], FlashWriterError> {
+        let mut range = self.start_address..=self.end_address;
+        if range.contains(&addr) {
+            Ok(unsafe { core::slice::from_raw_parts(addr as *const T, len_to_read) })
+        }
+        else {
+            Err(FlashWriterError::InvalidRange)
+        }
+
     }
 
 
