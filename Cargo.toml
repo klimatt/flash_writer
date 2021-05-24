@@ -9,17 +9,16 @@ edition = "2018"
 [dependencies]
 cfg-if = "0.1"
 rtt-target = { version = "0.2.2", features = ["cortex-m"] }
-cortex-m-rt = "0.6"
-cortex-m = "0.6"
+stm32-device-signature = {version = "0.3.3"}
 
-[dependencies.stm32ral]
-version = "0.4.0"
-default-features = false
+[dependencies.stm32f0xx-hal]
+version = "0.17.1"
 
 [features]
 default = []
-stm32f0x1 = [ "stm32ral/stm32f0x1", "stm32ral/rt"]
-stm32l4x6 = [ "stm32ral/stm32l4x6", "stm32ral/rt"]
+stm32f0xx = ["stm32-device-signature/stm32f0"]
+stm32f051 =  ["stm32f0xx", "stm32f0xx-hal/stm32f051"]
+
 
 
 [profile.release]
