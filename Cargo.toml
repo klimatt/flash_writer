@@ -14,6 +14,13 @@ version = "0.17.1"
 
 [features]
 default = []
+
+bker_bit = []
+use_page_num = []
+use_banks = []
+start_bit = []
+ext_errors = []
+
 stm32f0xx = ["stm32-device-signature/stm32f0"]
 stm32f051 =  ["stm32f0xx", "stm32f0xx-hal/stm32f051"]
 

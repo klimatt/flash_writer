@@ -18,28 +18,36 @@ pub enum FlashWriterError{
     WrongBankId,
     OutOfFlashWriterMemory,
     ProgErr,
-    SizeErr,
-    PgaErr,
-    PgsErr,
     WrpErr,
+    #[cfg(feature = "ext_errors")]
+    SizeErr,
+    #[cfg(feature = "ext_errors")]
+    PgaErr,
+    #[cfg(feature = "ext_errors")]
+    PgsErr,
+    #[cfg(feature = "ext_errors")]
     MissErr,
+    #[cfg(feature = "ext_errors")]
     FastErr,
 }
+
 
 struct WriteBuff {
     data: [u8; PROGRAM_SIZE],
     len: usize
 }
 
-pub struct FlashWriter{
+pub struct FlashWriter {
+    #[cfg(target_os = "use_banks")]
     bank_change_on_page_num: u32,
+
     start_address: u32,
     end_address: u32,
     next_write_address: u32,
     image_len: usize,
-    buffer: WriteBuff,
-    regs: FLASH
+    buffer: WriteBuff
 }
+
 
 fn check_range(range_cont: &mut RangeInclusive<u32>, range_check: &mut RangeInclusive<u32>) -> bool {
     range_cont.contains(range_check.start()) && range_cont.contains(range_check.end())
@@ -50,11 +58,7 @@ fn check_range(range_cont: &mut RangeInclusive<u32>, range_check: &mut RangeIncl
 fn check_errors_ram(regs: &mut FLASH) -> Result<(), FlashWriterError> {
     let sr = regs.sr.read();
     cfg_if! {
-        if #[cfg(feature = "stm32f0xx")] {
-            if sr.pgerr().bit_is_set() { return Err(FlashWriterError::ProgErr); }
-            if sr.wrprt().bit_is_set() { return Err(FlashWriterError::WrpErr); }
-        }
-        else{
+        if #[cfg(feature = "ext_errors")] {
             if sr.progerr().bit_is_set() { return Err(FlashWriterError::ProgErr); }
             if sr.sizerr().bit_is_set() { return Err(FlashWriterError::SizeErr); }
             if sr.pgaerr().bit_is_set() { return Err(FlashWriterError::PgaErr); }
@@ -62,6 +66,10 @@ fn check_errors_ram(regs: &mut FLASH) -> Result<(), FlashWriterError> {
             if sr.wrperr().bit_is_set() { return Err(FlashWriterError::WrpErr); }
             if sr.miserr().bit_is_set() { return Err(FlashWriterError::MissErr); }
             if sr.fasterr().bit_is_set() { return Err(FlashWriterError::FastErr); }
+        }
+        else{
+            if sr.pgerr().bit_is_set() { return Err(FlashWriterError::ProgErr); }
+            if sr.wrprt().bit_is_set() { return Err(FlashWriterError::WrpErr); }
         }
     }
     Ok(())
@@ -85,38 +93,39 @@ fn check_bsy_sram(regs: &mut FLASH) -> Result<(), FlashWriterError> {
 
 #[link_section = ".data"]
 #[inline(never)]
-fn erase_sram(flash_writer: &mut FlashWriter) -> Result<(), FlashWriterError> {
+fn erase_sram(flash_writer: &mut FlashWriter, regs: &mut FLASH) -> Result<(), FlashWriterError> {
     for addr in (flash_writer.start_address..=flash_writer.end_address).step_by(PAGE_SIZE) {
-        flash_writer.regs.cr.modify(|_, w| w.per().set_bit());
-        if USE_PAGE_NUM{
-            cfg_if! {
-                if #[cfg(feature = "stm32l4x6")]{
-                    let mut page_number = ((addr - START_ADDR) / PAGE_SIZE as u32);
-                    if page_number > flash_writer.bank_change_on_page_num {
-                        flash_writer.regs.cr.modify(|_,w|w.bker().set_bit());
-                        page_number = (page_number - flash_writer.bank_change_on_page_num + 1u32) ;
-                    }
-                    else {
-                        flash_writer.regs.cr.modify(|_,w|w.bker().clear_bit());
-                    }
-
-                    flash_writer.regs.cr.modify(|_, w| unsafe{ w.pnb().bits(page_number as u8) });
-                    flash_writer.regs.cr.modify(|_, w| w.start().set_bit());
+        regs.cr.modify(|_, w| w.per().set_bit());
+        cfg_if! {
+            if #[cfg(feature = "use_page_num")] {
+                let mut page_number = ((addr - START_ADDR) / PAGE_SIZE as u32);
+                if page_number > flash_writer.bank_change_on_page_num {
+                    regs.cr.modify(|_,w|w.bker().set_bit());
+                    page_number = (page_number - flash_writer.bank_change_on_page_num + 1u32) ;
                 }
+                else {
+                    regs.cr.modify(|_,w|w.bker().clear_bit());
+                }
+
+                regs.cr.modify(|_, w| unsafe{ w.pnb().bits(page_number as u8) });
+                regs.cr.modify(|_, w| w.start().set_bit());
             }
-        }
-        else {
-            flash_writer.regs.ar.write(|w| unsafe { w.bits(addr) });
+            else {
+                 regs.ar.write(|w| unsafe { w.bits(addr) });
+            }
         }
         cfg_if! {
-            if #[cfg(feature = "stm32f0xx")] {
-                flash_writer.regs.cr.modify(|_, w| w.strt().set_bit());
+            if #[cfg(feature = "start_bit")] {
+                regs.cr.modify(|_, w| w.start().set_bit());
+            }
+            else {
+                regs.cr.modify(|_, w| w.strt().set_bit());
             }
         }
-        match check_bsy_sram(&mut flash_writer.regs) {
+        match check_bsy_sram(regs) {
             Err(e) => { return Err(e); }
             Ok(_) => {
-                flash_writer.regs.cr.modify(|_, w| w.per().clear_bit());
+                regs.cr.modify(|_, w| w.per().clear_bit());
                 continue;
             }
         }
@@ -140,15 +149,17 @@ fn write_sram(regs: &mut FLASH, address: u32, data: ProgramChunk) -> Result<(), 
 }
 ///TODO move flash_regs to each function insted of owning it in struct
 impl FlashWriter{
-    pub fn new(mut range: RangeInclusive<u32>, regs: FLASH) -> Result<self::FlashWriter, FlashWriterError> {
+    pub fn new(mut range: RangeInclusive<u32>) -> Result<self::FlashWriter, FlashWriterError> {
         let mut flash_range = START_ADDR..=START_ADDR + stm32_device_signature::flash_size_kb() as u32 * 1024u32;
         match check_range(flash_range.borrow_mut(), range.borrow_mut()){
             true => {
-                regs.cr.modify(|_,w|w.eopie().set_bit());
-                unsafe{ regs.sr.modify(|_,w|w.bits(0x0000_0000)); };
+                //regs.cr.modify(|_,w|w.eopie().set_bit());
+                //unsafe{ regs.sr.modify(|_,w|w.bits(0x0000_0000)); };
                 Ok(
                     FlashWriter{
+                        #[cfg(target_os = "use_banks")]
                         bank_change_on_page_num: (stm32_device_signature::flash_size_kb() as u32 / (PAGE_SIZE * 2 / 1024 ) as u32) - 1u32,
+
                         start_address: *range.start(),
                         end_address: *range.end(),
                         next_write_address: *range.start(),
@@ -156,21 +167,20 @@ impl FlashWriter{
                         buffer: WriteBuff{
                             data: [0u8; PROGRAM_SIZE],
                             len: 0
-                        },
-                        regs
+                        }
                     })
             }
             false => { Err(FlashWriterError::InvalidRange)}
         }
     }
-    pub fn erase(&mut self) -> Result<(), FlashWriterError>{
-        match self.unlock(){
+    pub fn erase(&mut self, regs: &mut FLASH) -> Result<(), FlashWriterError>{
+        match self.unlock(regs){
             Err(e) => { return Err(e); }
             Ok(_) => {
-                match erase_sram(self){
+                match erase_sram(self, regs){
                     Err(e) => { return Err(e); }
                     Ok(_) => {
-                        self.lock();
+                        self.lock(regs);
                         Ok(())
                     }
                 }
@@ -182,34 +192,30 @@ impl FlashWriter{
         self.start_address
     }
 
-    fn lock(&mut self){
-        self.regs.cr.modify(|_,w| w.lock().set_bit());
+    fn lock(&self, regs: &mut FLASH){
+        regs.cr.modify(|_,w| w.lock().set_bit());
     }
 
-    pub fn release_regs(self) -> FLASH{
-        self.regs
-    }
-
-    fn unlock(&mut self) -> Result<(), FlashWriterError>{
-        if self.regs.cr.read().lock().bit_is_clear(){
+    fn unlock(&self, regs: &mut FLASH) -> Result<(), FlashWriterError>{
+        if regs.cr.read().lock().bit_is_clear(){
             return Ok(())
         }
-        match check_bsy_sram(&mut self.regs){
+        match check_bsy_sram(regs){
             Err(e) => { return Err(e); }
             Ok(_) => {
-                if self.regs.cr.read().lock().bit_is_set() {
-                    self.regs.keyr.write(|w|unsafe{w.bits(KEY_1)});
-                    self.regs.keyr.write(|w|unsafe{w.bits(KEY_2)});
+                if regs.cr.read().lock().bit_is_set() {
+                    regs.keyr.write(|w|unsafe{w.bits(KEY_1)});
+                    regs.keyr.write(|w|unsafe{w.bits(KEY_2)});
                 }
-                match self.regs.cr.read().lock().bit_is_clear(){
+                match regs.cr.read().lock().bit_is_clear(){
                     true => Ok(()),
                     false => Err(FlashWriterError::FlashLocked),
                 }
             }
         }
     }
-    pub fn write<T>(&mut self, data_input: &[T]) -> Result<(), FlashWriterError> {
-        match self.unlock(){
+    pub fn write<T:Sized>(&mut self, regs: &mut FLASH, data_input: &[T]) -> Result<(), FlashWriterError> {
+        match self.unlock(regs){
             Err(e) => { return Err(e); }
             Ok(_) => {
                 let data = unsafe { core::slice::from_raw_parts(data_input.as_ptr() as *const u8, data_input.len() * core::mem::size_of::<T>()) };
@@ -232,7 +238,7 @@ impl FlashWriter{
                                                        &mut dat as *mut _ as *mut u8,
                                                        PROGRAM_SIZE)
                     };
-                    match write_sram(self.regs.borrow_mut(), self.next_write_address, dat) {
+                    match write_sram(regs, self.next_write_address, dat) {
                         Ok(_) => {
                             if self.next_write_address <= (self.end_address - PROGRAM_SIZE as u32) {
                                 self.next_write_address += PROGRAM_SIZE as u32;
@@ -257,7 +263,7 @@ impl FlashWriter{
                                                            &mut dat as *mut _ as *mut u8,
                                                            PROGRAM_SIZE)
                         };
-                        match write_sram(self.regs.borrow_mut(), self.next_write_address, dat) {
+                        match write_sram(regs, self.next_write_address, dat) {
                             Ok(_) => {
                                 if self.next_write_address <= (self.end_address - PROGRAM_SIZE as u32) {
                                     self.next_write_address += PROGRAM_SIZE as u32;
@@ -277,9 +283,9 @@ impl FlashWriter{
         }
     }
 
-    pub fn read<T>(&mut self, addr: u32, len_to_read: usize) -> Result<&[T], FlashWriterError> {
-        let mut range = self.start_address..=self.end_address;
-        if range.contains(&addr) {
+    pub fn read<T:Sized>(&mut self, addr: u32, len_to_read: usize) -> Result<&[T], FlashWriterError> {
+        let range = self.start_address..=self.end_address;
+        if range.contains(&addr) && range.contains(&(addr + (len_to_read * core::mem::size_of::<T>()) as u32)) {
             Ok(unsafe { core::slice::from_raw_parts(addr as *const T, len_to_read) })
         }
         else {
@@ -289,21 +295,21 @@ impl FlashWriter{
     }
 
 
-    pub fn flush(&mut self) -> Result<(), FlashWriterError> {
+    pub fn flush(&mut self, regs: &mut FLASH) -> Result<(), FlashWriterError> {
         if self.buffer.len != 0 {
             let mut dat = ProgramChunk::max_value();
             for i in 0..self.buffer.len{
                 dat = dat << 8 | self.buffer.data[self.buffer.len - 1 - i] as ProgramChunk;
             }
             if self.next_write_address < (self.end_address - PROGRAM_SIZE as u32) {
-                match write_sram(self.regs.borrow_mut(), self.next_write_address, dat) {
+                match write_sram(regs, self.next_write_address, dat) {
                     Ok(_) => {
                         self.buffer.len = 0;
-                        self.lock();
+                        self.lock(regs);
                         Ok(())
                     }
                     Err(e) => {
-                        self.lock();
+                        self.lock(regs);
                         return Err(e);
                     }
                 }
@@ -313,7 +319,7 @@ impl FlashWriter{
             }
         }
         else {
-            self.lock();
+            self.lock(regs);
             Ok(())
         }
     }
@@ -322,10 +328,9 @@ impl FlashWriter{
 cfg_if!{
  if #[cfg(feature = "stm32f0xx")]{
         type ProgramChunk = u16;
-        const USE_PAGE_NUM: bool = false;
         const START_ADDR: u32 = 0x0800_0000;
         const PAGE_SIZE: usize = 1024;
-        const PROGRAM_SIZE: usize = 2;
+        const PROGRAM_SIZE: usize = core::mem::size_of::<ProgramChunk>();
         use stm32f0xx_hal::stm32::FLASH;
     }
 }
