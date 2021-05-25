@@ -1,6 +1,6 @@
 use core::ops::RangeInclusive;
 use core::borrow::BorrowMut;
-use stm32_device_signature;
+pub use stm32_device_signature;
 use cfg_if::cfg_if;
 
 /// First and Second keys witch must be written to unlock Flash
@@ -278,22 +278,11 @@ impl FlashWriter{
                     self.buffer.data[0..remainder.len()].copy_from_slice(remainder);
                     self.buffer.len = remainder.len();
                 }
+                self.lock(regs);
                 Ok(())
             }
         }
     }
-
-    pub fn read<T:Sized>(&mut self, addr: u32, len_to_read: usize) -> Result<&[T], FlashWriterError> {
-        let range = self.start_address..=self.end_address;
-        if range.contains(&addr) && range.contains(&(addr + (len_to_read * core::mem::size_of::<T>()) as u32)) {
-            Ok(unsafe { core::slice::from_raw_parts(addr as *const T, len_to_read) })
-        }
-        else {
-            Err(FlashWriterError::InvalidRange)
-        }
-
-    }
-
 
     pub fn flush(&mut self, regs: &mut FLASH) -> Result<(), FlashWriterError> {
         if self.buffer.len != 0 {
