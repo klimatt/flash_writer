@@ -1,7 +1,8 @@
-use core::ops::RangeInclusive;
+use core::ops::{Range, RangeInclusive};
 use core::borrow::BorrowMut;
 pub use stm32_device_signature;
 use cfg_if::cfg_if;
+use crate::mem_ext::MemExt;
 
 /// First and Second keys witch must be written to unlock Flash
 const KEY_1: u32 = 0x45670123;
@@ -49,8 +50,8 @@ pub struct FlashWriter {
 }
 
 
-fn check_range(range_cont: &mut RangeInclusive<u32>, range_check: &mut RangeInclusive<u32>) -> bool {
-    range_cont.contains(range_check.start()) && range_cont.contains(range_check.end())
+fn check_range(range_cont: &mut RangeInclusive<u32>, range_check: &mut Range<u32>) -> bool {
+    range_cont.contains(&range_check.start) && range_cont.contains(&range_check.end)
 }
 
 #[link_section = ".data"]
@@ -94,7 +95,7 @@ fn check_bsy_sram(regs: &mut FLASH) -> Result<(), FlashWriterError> {
 #[link_section = ".data"]
 #[inline(never)]
 fn erase_sram(flash_writer: &mut FlashWriter, regs: &mut FLASH) -> Result<(), FlashWriterError> {
-    for addr in (flash_writer.start_address..=flash_writer.end_address).step_by(PAGE_SIZE) {
+    for addr in (flash_writer.start_address..flash_writer.end_address).step_by(PAGE_SIZE) {
         regs.cr.modify(|_, w| w.per().set_bit());
         cfg_if! {
             if #[cfg(feature = "use_page_num")] {
@@ -149,7 +150,7 @@ fn write_sram(regs: &mut FLASH, address: u32, data: ProgramChunk) -> Result<(), 
 }
 ///TODO move flash_regs to each function insted of owning it in struct
 impl FlashWriter{
-    pub fn new(mut range: RangeInclusive<u32>) -> Result<self::FlashWriter, FlashWriterError> {
+    pub fn new(mut range: Range<u32>) -> Result<self::FlashWriter, FlashWriterError> {
         let mut flash_range = START_ADDR..=START_ADDR + stm32_device_signature::flash_size_kb() as u32 * 1024u32;
         match check_range(flash_range.borrow_mut(), range.borrow_mut()){
             true => {
@@ -160,9 +161,9 @@ impl FlashWriter{
                         #[cfg(target_os = "use_banks")]
                         bank_change_on_page_num: (stm32_device_signature::flash_size_kb() as u32 / (PAGE_SIZE * 2 / 1024 ) as u32) - 1u32,
 
-                        start_address: *range.start(),
-                        end_address: *range.end(),
-                        next_write_address: *range.start(),
+                        start_address: range.start,
+                        end_address: range.end,
+                        next_write_address: range.start,
                         image_len: 0usize,
                         buffer: WriteBuff{
                             data: [0u8; PROGRAM_SIZE],
@@ -312,6 +313,14 @@ impl FlashWriter{
             Ok(())
         }
     }
+}
+
+pub fn flash_read_slice<T:Sized>(addr: u32, len_to_read: usize) -> &'static [T] {
+    unsafe { core::slice::from_raw_parts(addr as *const T, len_to_read) }
+}
+
+pub fn flash_read<T:Sized>(addr: u32) -> T {
+    unsafe { core::ptr::read_volatile(addr as * const T) }
 }
 
 cfg_if!{
